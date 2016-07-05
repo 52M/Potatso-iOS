@@ -220,7 +220,7 @@ extension Manager {
     }
     
     var defaultToProxy: Bool {
-        return defaultConfigGroup.defaultToProxy ?? false
+        return upstreamProxy != nil && defaultConfigGroup.defaultToProxy
     }
     
     func generateGeneralConfig() throws {
@@ -272,12 +272,12 @@ extension Manager {
     }
     
     func generateShadowsocksConfig() throws {
-        guard let upstreamProxy = upstreamProxy where upstreamProxy.type == .Shadowsocks else {
-            return
-        }
         let confURL = Potatso.sharedProxyConfUrl()
-        let json = ["host": upstreamProxy.host, "port": upstreamProxy.port, "password": upstreamProxy.password ?? "", "authscheme": upstreamProxy.authscheme ?? "", "ota": upstreamProxy.ota]
-        try json.jsonString()?.writeToURL(confURL, atomically: true, encoding: NSUTF8StringEncoding)
+        var content = ""
+        if let upstreamProxy = upstreamProxy where upstreamProxy.type == .Shadowsocks {
+            content = ["host": upstreamProxy.host, "port": upstreamProxy.port, "password": upstreamProxy.password ?? "", "authscheme": upstreamProxy.authscheme ?? "", "ota": upstreamProxy.ota].jsonString() ?? ""
+        }
+        try content.writeToURL(confURL, atomically: true, encoding: NSUTF8StringEncoding)
     }
     
     func generateHttpProxyConfig() throws {
@@ -289,23 +289,6 @@ extension Manager {
         for p in [confDirUrl.path!, templateDirPath, temporaryDirPath, logDir] {
             if !NSFileManager.defaultManager().fileExistsAtPath(p) {
                 _ = try? NSFileManager.defaultManager().createDirectoryAtPath(p, withIntermediateDirectories: true, attributes: nil)
-            }
-        }
-        let directString = "forward ."
-        var proxyString = directString
-        var defaultRouteString = "default-route"
-        var defaultProxyString = "."
-
-        if let upstreamProxy = upstreamProxy {
-            switch upstreamProxy.type {
-            case .Shadowsocks:
-                proxyString = "forward-socks5 127.0.0.1:${ssport} ."
-                if defaultToProxy {
-                    defaultRouteString = "default-route-socks5"
-                    defaultProxyString = "127.0.0.1:${ssport} ."
-                }
-            default:
-                break
             }
         }
         let mainConf: [(String, AnyObject)] = [("confdir", confDirUrl.path!),
@@ -326,85 +309,43 @@ extension Manager {
                                              ("tolerate-pipelining", 1),
                                              ("socket-timeout", 300),
 //                                             ("debug", 1024+65536+1),
+//                                             ("debug", 131071)
                                              ("debug", 8192),
                                              ("actionsfile", "user.action"),
-                                             (defaultRouteString, defaultProxyString),
-//                                             ("debug", 131071)
+                                             ("global-mode", defaultToProxy),
                                              ]
-        var actionContent: [String] = []
-        var forwardIPDirectContent: [String] = []
-        var forwardIPProxyContent: [String] = []
-        var forwardURLDirectContent: [String] = []
-        var forwardURLProxyContent: [String] = []
-        var blockContent: [String] = []
-        let rules = defaultConfigGroup.ruleSets.map({ $0.rules }).flatMap({ $0 })
-        for rule in rules {
-            if rule.type == .GeoIP {
-                switch rule.action {
-                case .Direct:
-                    if (!forwardIPDirectContent.contains(rule.value)) {
-                        forwardIPDirectContent.append(rule.value)
-                    }
-                case .Proxy:
-                    if (!forwardIPProxyContent.contains(rule.value)) {
-                        forwardIPProxyContent.append(rule.value)
-                    }
-                case .Reject:
-                    break
-                }
-            }else if (rule.type == .IPCIDR) {
-                switch rule.action {
-                case .Direct:
-                    forwardIPDirectContent.append(rule.value)
-                case .Proxy:
-                    forwardIPProxyContent.append(rule.value)
-                case .Reject:
-                    break
-                }
-            }else {
-                switch rule.action {
-                case .Direct:
-                    forwardURLDirectContent.append(rule.pattern)
-                    break
-                case .Proxy:
-                    forwardURLProxyContent.append(rule.pattern)
-                    break
-                case .Reject:
-                    blockContent.append(rule.pattern)
-                }
-            }
-        }
 
         let mainContent = mainConf.map { "\($0) \($1)"}.joinWithSeparator("\n")
         try mainContent.writeToURL(Potatso.sharedHttpProxyConfUrl(), atomically: true, encoding: NSUTF8StringEncoding)
 
+        var actionContent: [String] = []
+        var forwardRules: [String] = []
+        let rules = defaultConfigGroup.ruleSets.map({ $0.rules }).flatMap({ $0 })
+        var hasGEOIPRule = false
+        for rule in rules {
+            switch rule.type {
+            case .GeoIP, .IPCIDR:
+                if rule.type == .GeoIP {
+                    if hasGEOIPRule {
+                        continue
+                    }
+                    hasGEOIPRule = true
+                }
+                actionContent.append("{+forward-rule}")
+                actionContent.append(rule.description)
+            default:
+                forwardRules.append(rule.description)
+            }
+        }
+
+        actionContent.append("{+forward-rule}")
+        actionContent.appendContentsOf(forwardRules)
+
+        // DNS pollution
         if let _ = upstreamProxy {
-            if forwardURLProxyContent.count > 0 {
-                actionContent.append("{+forward-override{\(proxyString)}}")
-                actionContent.appendContentsOf(forwardURLProxyContent)
-            }
-            if forwardIPProxyContent.count > 0 {
-                actionContent.append("{+forward-resolved-ip{\(proxyString)}}")
-                actionContent.appendContentsOf(forwardIPProxyContent)
-                actionContent.appendContentsOf(Pollution.dnsList.map({ $0 + "/32" }))
-            }
+            actionContent.append("{+forward-rule}")
+            actionContent.appendContentsOf(Pollution.dnsList.map({ "IP-CIDR, \($0)/32, PROXY" }))
         }
-
-        if forwardURLDirectContent.count > 0 {
-            actionContent.append("{+forward-override{\(directString)}}")
-            actionContent.appendContentsOf(forwardURLDirectContent)
-        }
-
-        if forwardIPDirectContent.count > 0 {
-            actionContent.append("{+forward-resolved-ip{\(directString)}}")
-            actionContent.appendContentsOf(forwardIPDirectContent)
-        }
-
-        if blockContent.count > 0 {
-            actionContent.append("{+block{Blocked} +handle-as-empty-document}")
-            actionContent.appendContentsOf(blockContent)
-        }
-
 
         let userActionString = actionContent.joinWithSeparator("\n")
         let userActionUrl = confDirUrl.URLByAppendingPathComponent("user.action")
@@ -543,3 +484,4 @@ extension Manager {
         return manager
     }
 }
+

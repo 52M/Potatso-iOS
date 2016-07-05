@@ -508,6 +508,9 @@ struct iob
 
 #define ACTION_FORWARD_RESOLVED_IP                   0x10000000UL
 
+#define ACTION_FORWARD_RULE                          0x20000000UL
+
+
 /** Action string index: How to deanimate GIFs */
 #define ACTION_STRING_DEANIMATE             0
 /** Action string index: Replacement for "From:" header */
@@ -546,9 +549,12 @@ struct iob
 #define ACTION_STRING_CHANGE_X_FORWARDED_FOR 17
 /** Action string index: how many minutes cookies should be valid. */
 #define ACTION_STRING_LIMIT_COOKIE_LIFETIME 18
+/** Action string index: forward resolved ip. */
 #define ACTION_STRING_FORWARD_RESOLVED_IP    19
+/** Action string index: forward rule. */
+#define ACTION_STRING_FORWARD_RULE          20
 /** Number of string actions. */
-#define ACTION_STRING_COUNT                20
+#define ACTION_STRING_COUNT                21
 
 
 
@@ -624,6 +630,12 @@ struct action_spec
    struct list multi_add[ACTION_MULTI_COUNT][1];
 };
 
+enum forward_routing {
+    ROUTE_PROXY =  0,
+    ROUTE_DIRECT = 1,
+    ROUTE_BLOCK = 2,
+};
+
 
 /**
  * This structure is used to store action files.
@@ -635,15 +647,19 @@ struct action_spec
  */
 struct url_actions
 {
-   struct pattern_spec url[1]; /**< The URL or tag pattern. */
+    struct pattern_spec url[1]; /**< The URL or tag pattern. */
+
+    char *rule;
+
+    enum forward_routing routing;
 
     radix_tree_t *tree;
 
-   struct action_spec *action; /**< Action settings that might be shared with
+    struct action_spec *action; /**< Action settings that might be shared with
                                     the list entry before or after the current
                                     one and can't be free'd willy nilly. */
 
-   struct url_actions *next;   /**< Next action section in file, or NULL. */
+    struct url_actions *next;   /**< Next action section in file, or NULL. */
 };
 
 enum forwarder_type {
@@ -910,104 +926,107 @@ typedef enum _ConnectionStatus {
  */
 struct client_state
 {
-   /** The proxy's configuration */
-   struct configuration_spec * config;
+    /** The proxy's configuration */
+    struct configuration_spec * config;
 
-   /** The actions to perform on the current request */
-   struct current_action_spec  action[1];
+    /** The actions to perform on the current request */
+    struct current_action_spec  action[1];
 
-   /** socket to talk to client (web browser) */
-   jb_socket cfd;
+    /** socket to talk to client (web browser) */
+    jb_socket cfd;
 
-   /** Number of requests received on the client socket. */
-   unsigned int requests_received_total;
+    /** Number of requests received on the client socket. */
+    unsigned int requests_received_total;
 
-   /** current connection to the server (may go through a proxy) */
-   struct reusable_connection server_connection;
+    /** current connection to the server (may go through a proxy) */
+    struct reusable_connection server_connection;
 
-   /** Multi-purpose flag container, see CSP_FLAG_* above */
-   unsigned int flags;
+    /** Multi-purpose flag container, see CSP_FLAG_* above */
+    unsigned int flags;
 
-   /** Client PC's IP address, as reported by the accept() function.
+    /** Client PC's IP address, as reported by the accept() function.
        As a string. */
-   char *ip_addr_str;
+    char *ip_addr_str;
 #ifdef HAVE_RFC2553
-   /** Client PC's TCP address, as reported by the accept() function.
+    /** Client PC's TCP address, as reported by the accept() function.
        As a sockaddr. */
-   struct sockaddr_storage tcp_addr;
+    struct sockaddr_storage tcp_addr;
 #else
-   /** Client PC's IP address, as reported by the accept() function.
+    /** Client PC's IP address, as reported by the accept() function.
        As a number. */
-   unsigned long ip_addr_long;
+    unsigned long ip_addr_long;
 #endif /* def HAVE_RFC2553 */
 
-   /** The URL that was requested */
-   struct http_request http[1];
+    /** The URL that was requested */
+    struct http_request http[1];
 
-   double timestamp[STATUS_COUNT];
+    double timestamp[STATUS_COUNT];
 
     ConnectionStatus status;
-   /*
+    /*
     * The final forwarding settings.
     * XXX: Currently this is only used for forward-override,
     * so we can free the space in sweep.
     */
-   struct forward_spec * fwd;
+    struct forward_spec *fwd;
 
-   struct forward_ip_spec * fwd_ip;
+    struct url_actions *rule;
 
-   int forwarded;
+    int forward_determined;
 
-   /** An I/O buffer used for buffering data read from the server */
-   /* XXX: should be renamed to server_iob */
-   struct iob iob[1];
+    /** An I/O buffer used for buffering data read from the server */
+    /* XXX: should be renamed to server_iob */
+    struct iob iob[1];
 
-   /** An I/O buffer used for buffering data read from the client */
-   struct iob client_iob[1];
+    /** An I/O buffer used for buffering data read from the client */
+    struct iob client_iob[1];
 
-   /** List of all headers for this request */
-   struct list headers[1];
+    /** List of all headers for this request */
+    struct list headers[1];
 
-   /** List of all tags that apply to this request */
-   struct list tags[1];
+    /** List of all tags that apply to this request */
+    struct list tags[1];
 
-   /** MIME-Type key, see CT_* above */
-   unsigned int content_type;
+    /** MIME-Type key, see CT_* above */
+    unsigned int content_type;
 
-   /** Actions files associated with this client */
-   struct file_list *actions_list[MAX_AF_FILES];
+    /** Actions files associated with this client */
+    struct file_list *actions_list[MAX_AF_FILES];
 
-   /** pcrs job files. */
-   struct file_list *rlist[MAX_AF_FILES];
+    /** pcrs job files. */
+    struct file_list *rlist[MAX_AF_FILES];
 
-   /** Length after content modification. */
-   unsigned long long content_length;
+    /** Length after content modification. */
+    unsigned long long content_length;
 
-   /* XXX: is this the right location? */
+    /* XXX: is this the right location? */
 
-   /** Expected length of content after which we
+    /** Expected length of content after which we
     * should stop reading from the server socket.
     */
-   unsigned long long expected_content_length;
+    unsigned long long expected_content_length;
 
-   /** Expected length of content after which we
+    /** Expected length of content after which we
     *  should stop reading from the client socket.
     */
-   unsigned long long expected_client_content_length;
+    unsigned long long expected_client_content_length;
 
 #ifdef FEATURE_TRUST
 
-   /** Trust file. */
-   struct file_list *tlist;
+    /** Trust file. */
+    struct file_list *tlist;
 
 #endif /* def FEATURE_TRUST */
 
-   /**
+    /**
     * Failure reason to embedded in the CGI error page,
     * or NULL. Currently only used for socks errors.
     */
-   char *error_message;
+    char *error_message;
 };
+
+extern struct url_actions *po_url_rules;
+extern struct url_actions *po_ip_rules;
 
 /**
  * List of client states so the main thread can keep
@@ -1144,42 +1163,35 @@ struct access_control_addr
  */
 struct forward_spec
 {
-   /** URL pattern that this forward_spec is for. */
-   struct pattern_spec url[1];
+    /** URL pattern that this forward_spec is for. */
+    struct pattern_spec url[1];
 
-   /** Connection type.  Must be SOCKS_NONE, SOCKS_4, SOCKS_4A or SOCKS_5. */
-   enum forwarder_type type;
-
-   /** SOCKS server hostname.  Only valid if "type" is SOCKS_4 or SOCKS_4A. */
-   char *gateway_host;
-
-   /** SOCKS server port. */
-   int   gateway_port;
-
-   /** Parent HTTP proxy hostname, or NULL for none. */
-   char *forward_host;
-
-   /** Parent HTTP proxy port. */
-   int   forward_port;
-
-   /** Next entry in the linked list. */
-   struct forward_spec *next;
-
-    int is_default;
-};
-
-struct forward_ip_spec {
     /** Connection type.  Must be SOCKS_NONE, SOCKS_4, SOCKS_4A or SOCKS_5. */
     enum forwarder_type type;
+
     /** SOCKS server hostname.  Only valid if "type" is SOCKS_4 or SOCKS_4A. */
     char *gateway_host;
+
     /** SOCKS server port. */
     int   gateway_port;
+
     /** Parent HTTP proxy hostname, or NULL for none. */
     char *forward_host;
+
     /** Parent HTTP proxy port. */
     int   forward_port;
+
+    /** Next entry in the linked list. */
+    struct forward_spec *next;
+
+    int is_default;
+
+    int should_unload;
 };
+
+extern struct forward_spec *proxy_list;
+
+extern struct forward_spec fwd_default[1]; /* Zero'ed due to being static. */
 
 /* Supported filter types */
 enum filter_type
@@ -1380,8 +1392,6 @@ struct configuration_spec
    /** Information about parent proxies (forwarding). */
    struct forward_spec *forward;
 
-    struct forward_ip_spec *default_route;
-
    /** Number of retries in case a forwarded connection attempt fails */
    int forwarded_connect_retries;
 
@@ -1413,6 +1423,8 @@ struct configuration_spec
    int (*loaders[NLOADERS])(struct client_state *);
 
 };
+
+extern int global_mode;
 
 /** Calculates the number of elements in an array, using sizeof. */
 #define SZ(X)  (sizeof(X) / sizeof(*X))
